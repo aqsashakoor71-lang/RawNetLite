@@ -128,17 +128,29 @@ def preprocess_from_csv(csv_path, input_dir, output_root, label_map=None, use_fu
         if class_limit and real >= class_limit and fake >= class_limit:
             break
         file_key = row[0]
-        label_raw = row[1]
+           label_raw = row[1]
 
-        if label_map:
-            label = label_map[label_raw.lower()]
+    if label_map:
+        # If a label_map is provided, use it (convert key to lowercase string)
+        key = str(label_raw).lower()
+        label = label_map[key]
+    else:
+        # Support both string labels ("bonafide"/"spoof") and numeric labels (0/1)
+        if isinstance(label_raw, str):
+            key = label_raw.lower()
+            if key in ["bonafide", "bona-fide", "bona_fide", "real"]:
+                label = 0
+            else:
+                label = 1
         else:
-            label = 0 if label_raw.lower() == "bona-fide" or label_raw.lower() == "real" else 1
+            # Assume it's already 0 or 1
+            label = int(label_raw)
 
-        if label == 0 and real >= class_limit:
-            continue
-        if label == 1 and fake >= class_limit:
-            continue
+    # Respect class_limit only if it is set
+    if class_limit is not None and label == 0 and real >= class_limit:
+        continue
+    if class_limit is not None and label == 1 and fake >= class_limit:
+        continue
 
         if use_full_path:
             audio_path = Path(file_key)
@@ -170,23 +182,58 @@ def preprocess_from_csv(csv_path, input_dir, output_root, label_map=None, use_fu
 if __name__ == "__main__":
     # Read parameters from command line
     parser = argparse.ArgumentParser(description="Preprocess audio files from a CSV file.")
-    parser.add_argument("csv_path", type=str, help="Path to the input CSV file.", required=True)
-    parser.add_argument("input_dir", type=str, help="Directory of the original audio files.", required=True)
-    parser.add_argument("output_root", type=str, help="Root directory for processed tensors.", required=True)
-    parser.add_argument("--label_map", type=str, help="Path to a JSON file for label mapping.", required=False)
-    parser.add_argument("--use_full_path", action="store_true", help="Use full paths from CSV.", required=False)
-    parser.add_argument("--class_limit", type=int, help="Limit samples per class.", required=False)
+
+    # Use optional-style flags so 'required=True' is valid
+    parser.add_argument(
+        "--csv_path",
+        type=str,
+        help="Path to the input CSV file.",
+        required=True,
+    )
+    parser.add_argument(
+        "--input_dir",
+        type=str,
+        help="Directory of the original audio files.",
+        required=True,
+    )
+    parser.add_argument(
+        "--output_root",
+        type=str,
+        help="Root directory for processed tensors.",
+        required=True,
+    )
+    parser.add_argument(
+        "--label_map",
+        type=str,
+        help="Path to a JSON file for label mapping.",
+        required=False,
+    )
+    parser.add_argument(
+        "--use_full_path",
+        action="store_true",
+        help="Use full paths from CSV.",
+    )
+    parser.add_argument(
+        "--class_limit",
+        type=int,
+        help="Limit samples per class.",
+        required=False,
+    )
+
     args = parser.parse_args()
+
     label_map = None
-    use_full_path = False
-    if args.use_full_path:
-        use_full_path = True
     if args.label_map:
         import json
-        with open(args.label_map, 'r') as f:
+        with open(args.label_map, "r") as f:
             label_map = json.load(f)
-        preprocess_from_csv(args.csv_path, args.input_dir, args.output_root, label_map, args.use_full_path, args.class_limit)
-    else:
-        preprocess_from_csv(args.csv_path, args.input_dir, args.output_root, None, args.use_full_path, args.class_limit)
 
+    preprocess_from_csv(
+        csv_path=args.csv_path,
+        input_dir=args.input_dir,
+        output_root=args.output_root,
+        label_map=label_map,
+        use_full_path=args.use_full_path,
+        class_limit=args.class_limit,
+    )
 
