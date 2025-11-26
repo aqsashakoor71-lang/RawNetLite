@@ -12,14 +12,16 @@ from FOR_dataset import FakeOrRealTestDataset
 from AVSpoof_dataset import AVSpoofTestDataset
 from CodecFake_dataset import CodecFakeTestDataset
 from torch.utils.data import random_split, DataLoader
-from sklearn.metrics import accuracy_score, f1_score, classification_report
-#from Mixed_dataset import DoubleDomainDataset, MultiDomainDataset, AugmentedMultiDomainDataset
+
+# We are NOT using cross-domain datasets in this experiment,
+# so we comment these out to avoid extra dependencies (audiomentations, etc.)
+# from Mixed_dataset import DoubleDomainDataset, MultiDomainDataset, AugmentedMultiDomainDataset
 
 # ------------------------------
 # PARAMETERS
 # ------------------------------
 BATCH_SIZE = 16          # Batch size for DataLoaders
-EPOCHS = 35              # Number of epochs for training
+EPOCHS = 20              # Number of epochs for training
 LEARNING_RATE = 1e-4     # Learning rate for the optimizer
 SEED = 42                # Random seed for reproducibility
 
@@ -73,6 +75,60 @@ DATASET_ROOT_CODECFAKE = "/kaggle/working/dummy_codecfake"
 
 
 # ------------------------------
+# SIMPLE METRICS IMPLEMENTATION (no sklearn)
+# ------------------------------
+def simple_accuracy(y_true, y_pred):
+    """Compute accuracy for binary labels (0/1)."""
+    y_true = np.array(y_true, dtype=np.int32)
+    y_pred = np.array(y_pred, dtype=np.int32)
+    return float((y_true == y_pred).mean()) if len(y_true) > 0 else 0.0
+
+
+def simple_f1(y_true, y_pred):
+    """Compute binary F1-score for positive class = 1."""
+    y_true = np.array(y_true, dtype=np.int32)
+    y_pred = np.array(y_pred, dtype=np.int32)
+
+    tp = np.sum((y_true == 1) & (y_pred == 1))
+    fp = np.sum((y_true == 0) & (y_pred == 1))
+    fn = np.sum((y_true == 1) & (y_pred == 0))
+
+    precision = tp / (tp + fp + 1e-8)
+    recall = tp / (tp + fn + 1e-8)
+
+    if precision + recall == 0:
+        return 0.0
+
+    f1 = 2 * precision * recall / (precision + recall)
+    return float(f1)
+
+
+def print_simple_classification_report(y_true, y_pred):
+    """Simple text report similar to sklearn's classification_report."""
+    y_true = np.array(y_true, dtype=np.int32)
+    y_pred = np.array(y_pred, dtype=np.int32)
+
+    report = []
+    for cls in [0, 1]:
+        tp = np.sum((y_true == cls) & (y_pred == cls))
+        fp = np.sum((y_true != cls) & (y_pred == cls))
+        fn = np.sum((y_true == cls) & (y_pred != cls))
+        tn = np.sum((y_true != cls) & (y_pred != cls))
+
+        precision = tp / (tp + fp + 1e-8)
+        recall = tp / (tp + fn + 1e-8)
+        f1 = 2 * precision * recall / (precision + recall + 1e-8)
+        support = np.sum(y_true == cls)
+
+        label_name = f"class {cls}"
+        report.append(
+            f"{label_name:9s}  prec: {precision:0.4f}  rec: {recall:0.4f}  f1: {f1:0.4f}  support: {support}"
+        )
+
+    print("\n".join(report))
+
+
+# ------------------------------
 # DATASET LOADING
 # ------------------------------
 def load_dataset():
@@ -114,36 +170,18 @@ def load_dataset():
             os.path.join(DATASET_ROOT_AVSPOOF, "fake_processed"),
         ]
 
+        # Below branches are kept for reference, but not used in our current config
         if CROSS_DOMAIN and not TRIPLE_DOMAIN:
-            # Double domain RawNetLite (FOR + AVSpoof2021)
-            print("[INFO] Using DoubleDomainDataset (FOR + AVSpoof2021)")
-            dataset = DoubleDomainDataset(
-                real_dirs=real_dirs,
-                fake_dirs=fake_dirs,
-                max_per_class=MAX_PER_CLASS,
-            )
+            print("[INFO] Cross-domain mode (double domain) is OFF in this experiment.")
+            raise ValueError("CROSS_DOMAIN=True is not supported in this configuration.")
 
         elif CROSS_DOMAIN and TRIPLE_DOMAIN and not AUGMENTATION:
-            # Triple domain RawNetLite (FOR + AVSpoof2021 + CodecFake)
-            print("[INFO] Using MultiDomainDataset (triple-domain)")
-            real_dirs.append(os.path.join(DATASET_ROOT_CODECFAKE, "real_processed"))
-            fake_dirs.append(os.path.join(DATASET_ROOT_CODECFAKE, "fake_processed"))
-            dataset = MultiDomainDataset(
-                real_dirs=real_dirs,
-                fake_dirs=fake_dirs,
-                max_per_class=MAX_PER_CLASS,
-            )
+            print("[INFO] Triple-domain mode is OFF in this experiment.")
+            raise ValueError("TRIPLE_DOMAIN=True is not supported here.")
 
         elif CROSS_DOMAIN and TRIPLE_DOMAIN and AUGMENTATION:
-            # Augmented triple-domain RawNetLite
-            print("[INFO] Using AugmentedMultiDomainDataset (augmented triple-domain)")
-            real_dirs.append(os.path.join(DATASET_ROOT_CODECFAKE, "real_processed"))
-            fake_dirs.append(os.path.join(DATASET_ROOT_CODECFAKE, "fake_processed"))
-            dataset = AugmentedMultiDomainDataset(
-                real_dirs=real_dirs,
-                fake_dirs=fake_dirs,
-                max_per_class=MAX_PER_CLASS,
-            )
+            print("[INFO] Augmented triple-domain mode is OFF in this experiment.")
+            raise ValueError("AUGMENTATION=True is not supported here.")
 
         else:
             raise ValueError("Invalid dataset configuration. Please check the parameters.")
@@ -167,6 +205,9 @@ def train():
     dataset = load_dataset()
     dataset_size = len(dataset)
     print(f"[INFO] Total samples in dataset: {dataset_size}")
+
+    if dataset_size == 0:
+        raise ValueError("Dataset is empty. Please check paths and preprocessing.")
 
     # Train/validation/test split (80/10/10)
     train_len = int(0.8 * dataset_size)
@@ -241,8 +282,8 @@ def train():
                 y_true.extend(labels.cpu().numpy().tolist())
                 y_pred.extend(preds.cpu().numpy().tolist())
 
-        acc = accuracy_score(y_true, y_pred)
-        f1 = f1_score(y_true, y_pred)
+        acc = simple_accuracy(y_true, y_pred)
+        f1 = simple_f1(y_true, y_pred)
         print(f"Validation Accuracy: {acc:.4f} - F1 Score: {f1:.4f}")
 
         # Save best model based on F1
@@ -273,12 +314,12 @@ def train():
             y_true.extend(labels.cpu().numpy().tolist())
             y_pred.extend(preds.cpu().numpy().tolist())
 
-    acc = accuracy_score(y_true, y_pred)
-    f1 = f1_score(y_true, y_pred)
+    acc = simple_accuracy(y_true, y_pred)
+    f1 = simple_f1(y_true, y_pred)
     print("\n[TEST RESULTS] on ASVspoof2019-LA (single-domain)")
     print(f"Test Accuracy: {acc:.4f} - Test F1: {f1:.4f}")
-    print("\nClassification Report:")
-    print(classification_report(y_true, y_pred, digits=4))
+    print("\nSimple classification report:")
+    print_simple_classification_report(y_true, y_pred)
 
 
 if __name__ == "__main__":
