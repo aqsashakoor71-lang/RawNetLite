@@ -6,28 +6,6 @@ import torch.nn.functional as F
 class ResBlock(nn.Module):
     """
     A 1D convolutional residual block for processing sequential data.
-
-    Each block consists of two convolutional layers with BatchNorm and ReLU activation.
-    The input is added to the output (residual connection), enabling gradient flow and improving convergence.
-
-    Parameters
-    ----------
-    channels : int
-        Number of input and output channels for the convolutional layers.
-
-    Forward Input
-    -------------
-    x : Tensor
-        Input tensor of shape [B, C, T], where B = batch size, C = channels, T = time steps.
-
-    Forward Output
-    --------------
-    Tensor
-        Output tensor of the same shape [B, C, T].
-
-    Notes
-    -----
-    - This structure follows the basic residual block idea from ResNet, adapted for 1D audio data.
     """
     def __init__(self, channels):
         super(ResBlock, self).__init__()
@@ -43,44 +21,13 @@ class ResBlock(nn.Module):
         x = self.bn2(self.conv2(x))
         return self.relu(x + residual)
 
-# RawNetLite model
+
+# RawNetLite model (MULTI-HEAD: CM + QUALITY)
 class RawNetLite(nn.Module):
     """
-    RawNetLite: A lightweight end-to-end architecture for audio deepfake detection.
-
-    The model operates directly on raw waveforms and combines convolutional residual blocks 
-    for local feature extraction with a bidirectional GRU for temporal modeling. 
-    It is optimized for binary classification between real and fake audio.
-
-    Architecture Overview
-    ---------------------
-    - 1D Conv + BatchNorm + ReLU
-    - Three residual blocks (ResBlock)
-    - AdaptiveAvgPool to compress the temporal axis
-    - Bidirectional GRU to capture long-range dependencies
-    - Two fully connected layers ending in sigmoid for probability output
-
-    Input Shape
-    -----------
-    x : Tensor
-        Shape [B, 1, T], where B = batch size, T = number of audio samples (typically 48000 for 3 seconds at 16kHz)
-
-    Output Shape
-    ------------
-    Tensor
-        Shape [B, 1] — probability of the input being a fake (value in [0,1]).
-
-    Example Usage
-    -------------
-    >>> model = RawNetLite()
-    >>> x = torch.randn(16, 1, 48000)  # batch of 3-second audio clips
-    >>> y = model(x)
-    >>> print(y.shape)  # torch.Size([16, 1])
-
-    Notes
-    -----
-    - Designed for efficiency and generalization in cross-dataset deepfake detection.
-    - Works directly on raw waveform inputs; no handcrafted features or spectrograms needed.
+    RawNetLite with multi-head outputs:
+      - CM head: spoof vs bonafide (binary)
+      - Quality head: clean vs degraded (2-class)
     """
     def __init__(self):
         super(RawNetLite, self).__init__()
@@ -94,11 +41,21 @@ class RawNetLite(nn.Module):
 
         self.pool = nn.AdaptiveAvgPool1d(64)  # Sequence reduction for GRU
 
-        self.gru = nn.GRU(input_size=64, hidden_size=128, num_layers=1,
-                          batch_first=True, bidirectional=True)
+        self.gru = nn.GRU(
+            input_size=64,
+            hidden_size=128,
+            num_layers=1,
+            batch_first=True,
+            bidirectional=True
+        )
 
         self.fc1 = nn.Linear(128 * 2, 64)
+
+        # ✅ CM head (binary spoof logit)
         self.fc2 = nn.Linear(64, 1)
+
+        # ✅ Quality head (clean/degraded logits)
+        self.fc_q = nn.Linear(64, 2)
 
     def forward(self, x):
         # x: [B, 1, T]
@@ -113,5 +70,14 @@ class RawNetLite(nn.Module):
         x = output[:, -1, :]                             # Last step → [B, 256]
 
         x = self.fc1(x)                                  # [B, 64]
-        x = self.fc2(x)                                  # [B, 1]
-        return torch.sigmoid(x)
+
+        # -------------------------------
+        # ❌ OLD (single-head)
+        # x = self.fc2(x)                                  # [B, 1]
+        # return torch.sigmoid(x)
+        # -------------------------------
+
+        # ✅ NEW (multi-head)
+        cm_logits = self.fc2(x)                           # [B, 1]
+        q_logits  = self.fc_q(x)                          # [B, 2]
+        return cm_logits, q_logits
