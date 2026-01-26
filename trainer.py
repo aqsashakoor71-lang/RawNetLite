@@ -7,57 +7,39 @@ from tqdm import tqdm
 import torch.optim as optim
 import torch.nn.functional as F
 
-from focal_loss import FocalLoss
+# from focal_loss import FocalLoss   # ❌ not used now (kept commented)
 
-# ✅ Multi-head model
 from RawNetLite import RawNetLite
-
-# ✅ This dataset uses .pt tensors (preprocessed)
 from FOR_dataset import FakeOrRealTestDataset
-
-# ❌ These are NOT used in single-domain training; keeping as comments (unwanted)
-# from AVSpoof_dataset import AVSpoofTestDataset
-# from CodecFake_dataset import CodecFakeTestDataset
 from torch.utils.data import random_split, DataLoader
 
-# ❌ Not using mixed datasets in this experiment; keep commented
-# from Mixed_dataset import DoubleDomainDataset, MultiDomainDataset, AugmentedMultiDomainDataset
+# from AVSpoof_dataset import AVSpoofTestDataset          # ❌ not used
+# from CodecFake_dataset import CodecFakeTestDataset      # ❌ not used
+# from Mixed_dataset import DoubleDomainDataset, MultiDomainDataset, AugmentedMultiDomainDataset  # ❌ not used
 
 
 # ------------------------------
 # PARAMETERS
 # ------------------------------
-BATCH_SIZE = 16          # Batch size
-EPOCHS = 20              # You can set 1 for quick demo
+BATCH_SIZE = 16
+EPOCHS = 3                  # ✅ set 3 for quick improvement; later 10/20
 LEARNING_RATE = 1e-4
 SEED = 42
 
-# Max samples
 MAX_REAL = 5000
 MAX_FAKE = 5000
-
-LOSS = "focal"           # "focal" or "bce"
-
-# ------------------------------
-# DATASET CONFIGURATION
-# ------------------------------
-# We want ONLY single-domain (ASVspoof2019-LA processed tensors)
-CROSS_DOMAIN = False
-TRIPLE_DOMAIN = False
-AUGMENTATION = False
 
 # ------------------------------
 # PATHS
 # ------------------------------
 MODEL_ROOT = os.path.join(os.getcwd(), "models")
-MODEL_NAME = "rawnetlite_multitask_cm_quality.pt"
+MODEL_NAME = "rawnetlite_multitask_cm_quality_balanced.pt"
 
-# ✅ This MUST exist and contain real_processed/ fake_processed
 DATASET_ROOT_FOR = "/kaggle/working/asv19_la_train_processed"
 
-# ❌ not used but kept
-DATASET_ROOT_AVSPOOF = "/kaggle/working/dummy_avspoof"
-DATASET_ROOT_CODECFAKE = "/kaggle/working/dummy_codecfake"
+CROSS_DOMAIN = False
+TRIPLE_DOMAIN = False
+AUGMENTATION = False
 
 
 # ------------------------------
@@ -81,25 +63,34 @@ def simple_f1(y_true, y_pred):
     recall = tp / (tp + fn + 1e-8)
     if precision + recall == 0:
         return 0.0
-
     return float(2 * precision * recall / (precision + recall + 1e-8))
 
 
-def print_simple_classification_report(y_true, y_pred):
+def best_threshold_by_f1(scores, labels, steps=200):
+    scores = np.array(scores, dtype=np.float32)
+    labels = np.array(labels, dtype=np.int32)
+
+    lo, hi = float(scores.min()), float(scores.max())
+    thrs = np.linspace(lo, hi, steps)
+
+    best_thr, best_f1v = 0.5, -1.0
+    for t in thrs:
+        preds = (scores > t).astype(np.int32)
+        f1v = simple_f1(labels, preds)
+        if f1v > best_f1v:
+            best_f1v = f1v
+            best_thr = float(t)
+    return best_thr, float(best_f1v)
+
+
+def confusion_counts(y_true, y_pred):
     y_true = np.array(y_true, dtype=np.int32)
     y_pred = np.array(y_pred, dtype=np.int32)
-
-    for cls in [0, 1]:
-        tp = np.sum((y_true == cls) & (y_pred == cls))
-        fp = np.sum((y_true != cls) & (y_pred == cls))
-        fn = np.sum((y_true == cls) & (y_pred != cls))
-
-        precision = tp / (tp + fp + 1e-8)
-        recall = tp / (tp + fn + 1e-8)
-        f1 = 2 * precision * recall / (precision + recall + 1e-8)
-        support = np.sum(y_true == cls)
-
-        print(f"class {cls}  prec: {precision:0.4f}  rec: {recall:0.4f}  f1: {f1:0.4f}  support: {support}")
+    tp = int(((y_true == 1) & (y_pred == 1)).sum())
+    tn = int(((y_true == 0) & (y_pred == 0)).sum())
+    fp = int(((y_true == 0) & (y_pred == 1)).sum())
+    fn = int(((y_true == 1) & (y_pred == 0)).sum())
+    return tn, fp, fn, tp
 
 
 # ------------------------------
@@ -107,11 +98,11 @@ def print_simple_classification_report(y_true, y_pred):
 # ------------------------------
 def degrade_waveform(waveforms):
     """
-    cheap codec-ish degradation
+    cheap codec-ish degradation (no external libs)
     waveforms: [B, 1, T]
     """
-    x = F.avg_pool1d(waveforms, kernel_size=4, stride=4)
-    x = x.repeat_interleave(4, dim=-1)
+    x = F.avg_pool1d(waveforms, kernel_size=4, stride=4)   # downsample
+    x = x.repeat_interleave(4, dim=-1)                     # upsample back
     if x.size(-1) > waveforms.size(-1):
         x = x[..., :waveforms.size(-1)]
     elif x.size(-1) < waveforms.size(-1):
@@ -130,11 +121,6 @@ def make_quality_labels(batch_size, device, p_degrade=0.5):
 # DATASET LOADING
 # ------------------------------
 def load_dataset():
-    """
-    We use FakeOrRealTestDataset which expects:
-    /output_root/real_processed/*.pt
-    /output_root/fake_processed/*.pt
-    """
     if not CROSS_DOMAIN:
         print("[INFO] Using FakeOrRealTestDataset (single-domain, ASVspoof2019-LA)")
         dataset = FakeOrRealTestDataset(
@@ -144,13 +130,17 @@ def load_dataset():
             max_fake=MAX_FAKE,
         )
         return dataset
+    raise ValueError("CROSS_DOMAIN=True not supported in this trainer.py (kept simple).")
 
-    # ❌ not used
-    raise ValueError("CROSS_DOMAIN=True is not supported in this file (kept commented).")
+
+def count_labels(subset):
+    ys = [subset[i][1] for i in range(len(subset))]
+    ys = np.array(ys, dtype=np.int32)
+    return int((ys == 0).sum()), int((ys == 1).sum())
 
 
 # ------------------------------
-# TRAINING FUNCTION
+# TRAIN
 # ------------------------------
 def train():
     torch.manual_seed(SEED)
@@ -162,19 +152,24 @@ def train():
     dataset = load_dataset()
     dataset_size = len(dataset)
     print(f"[INFO] Total samples in dataset: {dataset_size}")
-
     if dataset_size == 0:
-        raise ValueError("Dataset is empty. Check preprocessing output_root folders.")
+        raise ValueError("Dataset is empty. Check preprocessing output folders.")
 
     # Split 80/10/10
     train_len = int(0.8 * dataset_size)
     val_len = int(0.1 * dataset_size)
     test_len = dataset_size - train_len - val_len
-
     generator = torch.Generator().manual_seed(SEED)
     train_set, val_set, test_set = random_split(dataset, [train_len, val_len, test_len], generator=generator)
 
-    # num_workers=0 for Kaggle stability
+    # class stats (defendable)
+    tr_r, tr_f = count_labels(train_set)
+    va_r, va_f = count_labels(val_set)
+    te_r, te_f = count_labels(test_set)
+    print(f"[INFO] Train real={tr_r} fake={tr_f}")
+    print(f"[INFO] Val   real={va_r} fake={va_f}")
+    print(f"[INFO] Test  real={te_r} fake={te_f}")
+
     train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_set, batch_size=BATCH_SIZE, num_workers=0)
     test_loader = DataLoader(test_set, batch_size=BATCH_SIZE, num_workers=0)
@@ -184,41 +179,38 @@ def train():
 
     model = RawNetLite().to(device)
 
-    # CM loss
-    if LOSS == "focal":
-        criterion_cm = FocalLoss(alpha=0.25, gamma=2.0)
-    elif LOSS == "bce":
-        criterion_cm = nn.BCELoss()
-    else:
-        raise ValueError("Invalid loss function. Choose 'focal' or 'bce'.")
+    # ✅ Fix imbalance properly: BCEWithLogitsLoss + pos_weight
+    # labels: 0=real, 1=fake
+    # pos_weight boosts positive class (fake) relative to negative
+    pos_weight = torch.tensor([tr_r / (tr_f + 1e-8)], device=device)
+    criterion_cm = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    print("[INFO] pos_weight:", float(pos_weight.item()))
 
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-    best_f1 = 0.0
+    best_f1 = -1.0
+    best_thr = 0.5
 
-    # --------------------------
-    # EPOCH LOOP
-    # --------------------------
     for epoch in range(EPOCHS):
+        # ---------- TRAIN ----------
         model.train()
         total_loss = 0.0
 
         for waveforms, labels in tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} - Training"):
-            waveforms = waveforms.to(device).float()   # [B,1,T]
-            labels = labels.to(device).float()         # [B]
+            waveforms = waveforms.to(device).float()    # [B,1,T]
+            labels = labels.to(device).float()          # [B]
 
-            # ---- QUALITY LABELS + DEGRADE HALF ----
+            # quality labels + degrade half batch
             q_labels = make_quality_labels(waveforms.size(0), device=device)  # [B]
-            waveforms_degraded = degrade_waveform(waveforms)
+            w_deg = degrade_waveform(waveforms)
             mask = (q_labels == 1).view(-1, 1, 1)
-            waveforms_used = torch.where(mask, waveforms_degraded, waveforms)
+            waveforms_used = torch.where(mask, w_deg, waveforms)
 
-            # ---- MULTI-HEAD FORWARD ----
-            cm_logits, q_logits = model(waveforms_used)            # cm:[B,1], q:[B,2]
-            cm_prob = torch.sigmoid(cm_logits).squeeze()           # [B]
+            cm_logits, q_logits = model(waveforms_used)          # cm:[B,1], q:[B,2]
+            cm_logits = cm_logits.squeeze()                      # [B]
 
-            # ---- LOSSES ----
-            loss_cm = criterion_cm(cm_prob, labels)
+            # losses
+            loss_cm = criterion_cm(cm_logits, labels)            # logits-based
             loss_q = F.cross_entropy(q_logits, q_labels)
             loss = loss_cm + 0.3 * loss_q
 
@@ -228,12 +220,11 @@ def train():
 
             total_loss += loss.item()
 
-        avg_train_loss = total_loss / len(train_loader)
-        print(f"\nEpoch {epoch+1}/{EPOCHS} - Train Loss: {avg_train_loss:.4f}")
+        print(f"\nEpoch {epoch+1}/{EPOCHS} - Train Loss: {total_loss / max(1,len(train_loader)):.4f}")
 
-        # ---------- VALIDATION (CM only) ----------
+        # ---------- VALIDATION ----------
         model.eval()
-        y_true, y_pred = [], []
+        scores, y_true = [], []
 
         with torch.no_grad():
             for waveforms, labels in tqdm(val_loader, desc=f"Epoch {epoch+1}/{EPOCHS} - Validation"):
@@ -242,31 +233,42 @@ def train():
 
                 cm_logits, q_logits = model(waveforms)
                 cm_prob = torch.sigmoid(cm_logits).squeeze()
-                preds = (cm_prob > 0.5).float()
 
+                scores.extend(cm_prob.cpu().numpy().tolist())
                 y_true.extend(labels.cpu().numpy().tolist())
-                y_pred.extend(preds.cpu().numpy().tolist())
 
-        acc = simple_accuracy(y_true, y_pred)
-        f1 = simple_f1(y_true, y_pred)
-        print(f"Validation Accuracy: {acc:.4f} - F1 Score: {f1:.4f}")
+        thr, bf1 = best_threshold_by_f1(scores, y_true)
+        preds = (np.array(scores) > thr).astype(np.int32)
+        acc = simple_accuracy(y_true, preds)
+        f1v = simple_f1(y_true, preds)
+        tn, fp, fn, tp = confusion_counts(y_true, preds)
 
-        if f1 > best_f1:
-            best_f1 = f1
+        print(f"Validation thr={thr:.4f} | Acc={acc:.4f} | F1={f1v:.4f} | TN={tn} FP={fp} FN={fn} TP={tp}")
+
+        # save best
+        if f1v > best_f1:
+            best_f1 = f1v
+            best_thr = thr
             save_path = os.path.join(MODEL_ROOT, MODEL_NAME)
-            torch.save(model.state_dict(), save_path)
-            print(f"[INFO] Saved best model at epoch {epoch+1} with F1 = {f1:.4f}")
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "best_thr": best_thr,
+                    "best_f1": best_f1,
+                },
+                save_path,
+            )
+            print(f"[INFO] Saved best model at epoch {epoch+1} with F1={best_f1:.4f} thr={best_thr:.4f}")
 
-    # --------------------------
-    # TEST PHASE (best model)
-    # --------------------------
+    # ---------- TEST ----------
     print("\n[INFO] Evaluation on test set with best saved model:")
-    best_model_path = os.path.join(MODEL_ROOT, MODEL_NAME)
-    model.load_state_dict(torch.load(best_model_path, map_location=device), strict=False)
+    ckpt_path = os.path.join(MODEL_ROOT, MODEL_NAME)
+    ckpt = torch.load(ckpt_path, map_location=device)
+    model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    best_thr = float(ckpt.get("best_thr", 0.5))
     model.eval()
 
-    y_true, y_pred = [], []
-
+    scores, y_true = [], []
     with torch.no_grad():
         for waveforms, labels in tqdm(test_loader, desc="Testing"):
             waveforms = waveforms.to(device).float()
@@ -274,17 +276,34 @@ def train():
 
             cm_logits, q_logits = model(waveforms)
             cm_prob = torch.sigmoid(cm_logits).squeeze()
-            preds = (cm_prob > 0.5).float()
 
+            scores.extend(cm_prob.cpu().numpy().tolist())
             y_true.extend(labels.cpu().numpy().tolist())
-            y_pred.extend(preds.cpu().numpy().tolist())
 
-    acc = simple_accuracy(y_true, y_pred)
-    f1 = simple_f1(y_true, y_pred)
+    preds = (np.array(scores) > best_thr).astype(np.int32)
+    acc = simple_accuracy(y_true, preds)
+    f1v = simple_f1(y_true, preds)
+    tn, fp, fn, tp = confusion_counts(y_true, preds)
+
     print("\n[TEST RESULTS] on ASVspoof2019-LA (single-domain)")
-    print(f"Test Accuracy: {acc:.4f} - Test F1: {f1:.4f}")
+    print(f"Best thr(from val): {best_thr:.4f}")
+    print(f"Test Accuracy: {acc:.4f} - Test F1: {f1v:.4f}")
+    print(f"TN={tn} FP={fp} FN={fn} TP={tp}")
+
+    # small class-wise report
     print("\nSimple classification report:")
-    print_simple_classification_report(y_true, y_pred)
+    # class 0
+    y_true_np = np.array(y_true, dtype=np.int32)
+    y_pred_np = np.array(preds, dtype=np.int32)
+    for cls in [0, 1]:
+        tp_c = int(((y_true_np == cls) & (y_pred_np == cls)).sum())
+        fp_c = int(((y_true_np != cls) & (y_pred_np == cls)).sum())
+        fn_c = int(((y_true_np == cls) & (y_pred_np != cls)).sum())
+        prec = tp_c / (tp_c + fp_c + 1e-8)
+        rec = tp_c / (tp_c + fn_c + 1e-8)
+        f1c = 2 * prec * rec / (prec + rec + 1e-8)
+        sup = int((y_true_np == cls).sum())
+        print(f"class {cls}  prec: {prec:0.4f}  rec: {rec:0.4f}  f1: {f1c:0.4f}  support: {sup}")
 
 
 if __name__ == "__main__":
