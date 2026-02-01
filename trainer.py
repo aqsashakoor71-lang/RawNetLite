@@ -24,7 +24,7 @@ TARGET_LEN = 48000
 # PATHS
 # ------------------------------
 MODEL_ROOT = os.path.join(os.getcwd(), "models")
-MODEL_NAME = "SE_RawNetLite_ASV2019.pt"
+MODEL_NAME = "base_RawNetLite_ASV2019.pt"
 
 ASV2019_BASE = "/kaggle/input/asvpoof-2019-dataset"
 
