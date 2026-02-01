@@ -1,128 +1,199 @@
-import torch
+import os
 import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+
+# ---- install soundfile if needed ----
+try:
+    import soundfile as sf
+except Exception:
+    !pip -q install soundfile
+    import soundfile as sf
+
 from RawNetLite import RawNetLite
-from torch.utils.data import DataLoader
-from CodecFake_dataset import CodecFakeTestDataset
-from AVSpoof_dataset import AVSpoofTestDataset
-from FOR_dataset import FakeOrRealTestDataset
-from sklearn.metrics import classification_report, roc_curve
-from Mixed_dataset import MultiDomainDataset, AugmentedMultiDomainDataset
 
-# Parameters
-MAX_REAL = 5000
-MAX_FAKE = 5000
-ELEMENTS_PER_CLASS = 25000
+# -----------------------
+# PATHS
+# -----------------------
+CKPT_PATH = "/kaggle/working/RawNetLite/models/SE_RawNetLite_ASV2019.pt"  # from patched trainer.py
+META_2021 = "/kaggle/input/avsspoof-2021/LA-keys-full/keys/LA/CM/trial_metadata.txt"
+AUDIO_2021_DIR = "/kaggle/input/avsspoof-2021/ASVspoof2021_LA_eval/flac"
+
+TARGET_LEN = 48000  # 3 seconds @16k
 BATCH_SIZE = 16
-MODEL_ROOT = "/models/"
 
-# Folders
-FOR_REAL = "path/to/FOR/real_processed"
-FOR_FAKE = "path/to/FOR/fake_processed"
-CODECFAKE_REAL = "path/to/CodecFake/real_processed"
-CODECFAKE_FAKE = "path/to/CodecFake/fake_processed"
-AVSPOOF_REAL = "path/to/AVSpoof2021/real_processed"
-AVSPOOF_FAKE = "path/to/AVSpoof2021/fake_processed"
+print("CKPT exists:", os.path.exists(CKPT_PATH), CKPT_PATH)
+print("META exists:", os.path.exists(META_2021), META_2021)
+print("AUDIO dir exists:", os.path.exists(AUDIO_2021_DIR), AUDIO_2021_DIR)
 
-models = [
-    "rawnet_lite.pt",
-    "cross_domain_rawnet_lite.pt",
-    "cross_domain_focal_rawnet_lite.pt",
-    "triple_cross_domain_focal_rawnet_lite.pt",
-    "augmented_triple_cross_domain_focal_rawnet_lite.pt"
-]
+# -----------------------
+# Metrics (no sklearn)
+# -----------------------
+def simple_accuracy(y_true, y_pred):
+    y_true = np.array(y_true, dtype=np.int32)
+    y_pred = np.array(y_pred, dtype=np.int32)
+    return float((y_true == y_pred).mean()) if len(y_true) > 0 else 0.0
 
-# EER
-def compute_eer(y_true, y_scores):
-    fpr, tpr, thresholds = roc_curve(y_true, y_scores, pos_label=1)
-    fnr = 1 - tpr
-    eer_threshold = thresholds[np.nanargmin(np.absolute(fnr - fpr))]
-    eer = fpr[np.nanargmin(np.absolute(fnr - fpr))]
-    return eer, eer_threshold
+def simple_f1(y_true, y_pred):
+    y_true = np.array(y_true, dtype=np.int32)
+    y_pred = np.array(y_pred, dtype=np.int32)
+    tp = np.sum((y_true == 1) & (y_pred == 1))
+    fp = np.sum((y_true == 0) & (y_pred == 1))
+    fn = np.sum((y_true == 1) & (y_pred == 0))
+    precision = tp / (tp + fp + 1e-8)
+    recall = tp / (tp + fn + 1e-8)
+    return float(2 * precision * recall / (precision + recall + 1e-8)) if (precision+recall)>0 else 0.0
 
-# Dataset
-test_dataset_for = FakeOrRealTestDataset(
-    real_dir=FOR_REAL,
-    fake_dir=FOR_FAKE,
-    max_real=MAX_REAL,
-    max_fake=MAX_FAKE
-)
+def confusion_counts(y_true, y_pred):
+    y_true = np.array(y_true, dtype=np.int32)
+    y_pred = np.array(y_pred, dtype=np.int32)
+    tp = int(((y_true == 1) & (y_pred == 1)).sum())
+    tn = int(((y_true == 0) & (y_pred == 0)).sum())
+    fp = int(((y_true == 0) & (y_pred == 1)).sum())
+    fn = int(((y_true == 1) & (y_pred == 0)).sum())
+    return tn, fp, fn, tp
 
-test_dataset_codecfake = CodecFakeTestDataset(
-    real_dir=CODECFAKE_REAL,
-    fake_dir=CODECFAKE_FAKE,
-    max_real=MAX_REAL,
-    max_fake=MAX_FAKE
-)
+def compute_eer(labels, scores):
+    """
+    EER without sklearn:
+    - sort by score
+    - sweep threshold
+    - find point where FPR ~= FNR
+    """
+    labels = np.array(labels, dtype=np.int32)
+    scores = np.array(scores, dtype=np.float64)
 
-test_dataset_avspoof = AVSpoofTestDataset(
-    real_dir=AVSPOOF_REAL,
-    fake_dir=AVSPOOF_FAKE,
-    max_real=MAX_REAL,
-    max_fake=MAX_FAKE
-)
+    # sort by score descending
+    idx = np.argsort(scores)[::-1]
+    labels = labels[idx]
+    scores = scores[idx]
 
-test_dataset_cross = MultiDomainDataset(
-    for_real_dir=FOR_REAL,
-    for_fake_dir=FOR_FAKE,
-    avs_real_dir=AVSPOOF_REAL,
-    avs_fake_dir=AVSPOOF_FAKE,
-    mix_ratio=0.5,
-    max_per_class=ELEMENTS_PER_CLASS
-)
+    P = (labels == 1).sum()
+    N = (labels == 0).sum()
+    if P == 0 or N == 0:
+        return np.nan, np.nan
 
-test_dataset_triple = AugmentedMultiDomainDataset(
-    real_dirs=[FOR_REAL, AVSPOOF_REAL, CODECFAKE_REAL],
-    fake_dirs=[FOR_FAKE, AVSPOOF_FAKE, CODECFAKE_FAKE],
-    total_per_class=ELEMENTS_PER_CLASS
-)
+    tp = 0
+    fp = 0
 
-# DataLoader
-loaders = [
-    DataLoader(test_dataset_for, batch_size=BATCH_SIZE),
-    DataLoader(test_dataset_codecfake, batch_size=BATCH_SIZE),
-    DataLoader(test_dataset_avspoof, batch_size=BATCH_SIZE),
-    DataLoader(test_dataset_cross, batch_size=BATCH_SIZE),
-    DataLoader(test_dataset_triple, batch_size=BATCH_SIZE),
-]
+    best_eer = 1.0
+    best_thr = scores[0]
 
-test_names = [
-    "FOR",
-    "CodecFake",
-    "AVSpoof2021",
-    "Cross-dataset (FOR+AVS)",
-    "Triple-dataset"
-]
-print("Beginning test bench...")
-for model in models:
-    print(f"Loading model {model}...")
-    MODEL_PATH = MODEL_ROOT + model
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = RawNetLite().to(device)
-    model.load_state_dict(torch.load(MODEL_PATH))
-    model.eval()
-
-    for i, test_loader in enumerate(loaders):
-        y_true, y_pred, y_scores = [], [], []
-
-        with torch.no_grad():
-            for waveforms, labels in test_loader:
-                waveforms = waveforms.to(device)
-                labels = labels.to(device)
-                outputs = model(waveforms).squeeze()
-
-                probs = outputs.cpu().numpy()
-                preds = (probs > 0.5).astype(int)
-
-                y_scores.extend(probs)
-                y_pred.extend(preds)
-                y_true.extend(labels.cpu().numpy())
-
-        if i <= 2:
-            print(f"Test {test_names[i]}:")
+    # thresholds at each unique score
+    for i in range(len(scores)):
+        if labels[i] == 1:
+            tp += 1
         else:
-            print(f"Test {test_names[i]} (balanced at {ELEMENTS_PER_CLASS} elements per class):")
+            fp += 1
 
-        print(classification_report(y_true, y_pred, digits=4))
-        eer, threshold = compute_eer(y_true, y_scores)
-        print(f"Equal Error Rate (EER): {eer:.4f} at threshold {threshold:.4f}\n")
-print("Test bench completed!")
+        # when score changes, evaluate at that threshold
+        if i == len(scores)-1 or scores[i] != scores[i+1]:
+            tpr = tp / (P + 1e-12)
+            fpr = fp / (N + 1e-12)
+            fnr = 1 - tpr
+            diff = abs(fpr - fnr)
+            eer = (fpr + fnr) / 2
+            if diff < best_eer:
+                best_eer = diff
+                best_thr = scores[i]
+                best_val = eer
+
+    return float(best_val), float(best_thr)
+
+# -----------------------
+# Dataset for 2021 eval
+# -----------------------
+class ASV2021LAEvalDataset(Dataset):
+    """
+    trial_metadata format sample:
+    LA_0009 LA_E_9332881 alaw ita_tx A07 spoof notrim eval
+             ^ file id is 2nd column (LA_E_...)
+                              label is 6th column (bonafide/spoof)
+    """
+    def __init__(self, meta_path, audio_dir, target_len=48000):
+        self.audio_dir = audio_dir
+        self.target_len = target_len
+        self.items = []
+
+        with open(meta_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                p = line.strip().split()
+                if len(p) < 6:
+                    continue
+                utt = p[1]
+                lab = p[5]  # bonafide/spoof
+                y = 0 if lab == "bonafide" else 1
+                path = os.path.join(audio_dir, utt + ".flac")
+                if os.path.exists(path):
+                    self.items.append((path, y))
+
+        print(f"[INFO] 2021-LA eval loaded: {len(self.items)} samples")
+
+    def _fix_len(self, x):
+        T = self.target_len
+        if len(x) == T:
+            return x
+        if len(x) > T:
+            return x[:T]
+        return np.pad(x, (0, T - len(x)), mode="constant")
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, idx):
+        path, y = self.items[idx]
+        x, sr = sf.read(path, dtype="float32")
+        if x.ndim > 1:
+            x = np.mean(x, axis=1)
+        x = self._fix_len(x)
+        x = torch.tensor(x).unsqueeze(0)  # [1,T]
+        return x, y
+
+# -----------------------
+# Load model
+# -----------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = RawNetLite().to(device)
+
+ckpt = torch.load(CKPT_PATH, map_location=device)
+if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+    model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    best_thr_from_val = float(ckpt.get("best_thr", 0.5))
+else:
+    # in case it was saved directly as state_dict
+    model.load_state_dict(ckpt, strict=False)
+    best_thr_from_val = 0.5
+
+model.eval()
+print("[INFO] Loaded model. best_thr_from_val:", best_thr_from_val)
+
+# -----------------------
+# Run evaluation
+# -----------------------
+ds = ASV2021LAEvalDataset(META_2021, AUDIO_2021_DIR, target_len=TARGET_LEN)
+dl = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+
+scores = []
+y_true = []
+
+with torch.no_grad():
+    for x, y in tqdm(dl, desc="ASV2021 eval"):
+        x = x.to(device).float()
+        out = model(x).view(-1)  # already sigmoid probs
+        scores.extend(out.detach().cpu().numpy().tolist())
+        y_true.extend(y.numpy().tolist())
+
+# decision using fixed threshold (val threshold from 2019 train)
+preds_fixed = (np.array(scores) > best_thr_from_val).astype(np.int32)
+acc_fixed = simple_accuracy(y_true, preds_fixed)
+f1_fixed = simple_f1(y_true, preds_fixed)
+tn, fp, fn, tp = confusion_counts(y_true, preds_fixed)
+eer, eer_thr = compute_eer(y_true, scores)
+
+print("\n=== ASVspoof2021-LA eval (Cross-domain) ===")
+print(f"Samples: {len(y_true)}")
+print(f"Fixed threshold (from 2019-val): {best_thr_from_val:.4f}")
+print(f"Acc: {acc_fixed:.4f} | F1: {f1_fixed:.4f}")
+print(f"Confusion [TN FP FN TP]: {tn} {fp} {fn} {tp}")
+print(f"EER: {eer:.4f} @ thr={eer_thr:.4f}")
