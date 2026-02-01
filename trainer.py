@@ -15,7 +15,7 @@ from sklearn.metrics import accuracy_score, f1_score, classification_report
 # PARAMETERS
 # ------------------------------
 BATCH_SIZE = 16
-EPOCHS = 35
+EPOCHS = 20
 LEARNING_RATE = 1e-4
 SEED = 42
 
