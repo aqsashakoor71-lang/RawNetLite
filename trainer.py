@@ -13,7 +13,7 @@ from torch.utils.data import Dataset, random_split, DataLoader
 # PARAMETERS
 # ------------------------------
 BATCH_SIZE = 16
-EPOCHS = 3                  # quick test; later 10/20
+EPOCHS = 20    # quick test; later 10/20
 LEARNING_RATE = 1e-4
 SEED = 42
 
