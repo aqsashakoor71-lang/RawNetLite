@@ -14,7 +14,8 @@ from RawNetLite import RawNetLite
 # -------------------------
 # PATHS (as per your request)
 # -------------------------
-ASV19_LA_ROOT = "ASV19_LA_ROOT = "/kaggle/input/asvpoof-2019-dataset/LA/LA"
+ASV19_LA_ROOT = "/kaggle/input/asvpoof-2019-dataset/LA/LA"
+
 ASV21_LA_EVAL_ROOT = "/kaggle/input/avsspoof-2021/ASVspoof2021_LA_eval"
 
 # -------------------------
