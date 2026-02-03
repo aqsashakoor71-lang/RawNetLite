@@ -7,11 +7,12 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.dataloader import default_collate
 from tqdm import tqdm
 import soundfile as sf
+from sklearn.metrics import accuracy_score, f1_score
 
 from RawNetLite import RawNetLite
 
 # ============================================================
-# PATHS (CONFIRMED KAGGLE PATHS)
+# PATHS (CONFIRMED)
 # ============================================================
 ASV19_LA_ROOT = "/kaggle/input/asvpoof-2019-dataset/LA/LA"
 
@@ -23,11 +24,11 @@ ASV19_TRAIN_PROTO = os.path.join(ASV19_CM_PROTO_DIR, "ASVspoof2019.LA.cm.train.t
 ASV19_DEV_PROTO   = os.path.join(ASV19_CM_PROTO_DIR, "ASVspoof2019.LA.cm.dev.trl.txt")
 
 # ============================================================
-# TRAINING CONFIG (6 HOURS SAFE)
+# TRAINING CONFIG
 # ============================================================
 SEED = 42
 BATCH_SIZE = 16
-EPOCHS = 20          # 🔥 optimized for your remaining GPU time
+EPOCHS = 20          # ✅ FIXED AS REQUESTED
 LR = 1e-4
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 2
@@ -36,19 +37,19 @@ SR = 16000
 CLIP_LEN = 48000
 
 # ============================================================
-# MODEL SAVE (SAFE + DOWNLOADABLE)
+# MODEL SAVE (SAFE)
 # ============================================================
 MODEL_DIR = "/kaggle/working/models"
 BACKUP_DIR = "/kaggle/working/backup_models"
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
-MODEL_NAME = "RawNetLite_ASV19LA_ULTRASAFE_v1.pt"
+MODEL_NAME = "RawNetLite_ASV19LA_ULTRASAFE_E20.pt"
 SAVE_PATH = os.path.join(MODEL_DIR, MODEL_NAME)
 BACKUP_PATH = os.path.join(BACKUP_DIR, MODEL_NAME)
 
 # ============================================================
-# REPRODUCIBILITY
+# SEED
 # ============================================================
 def set_seed(seed):
     random.seed(seed)
@@ -127,7 +128,26 @@ def safe_collate(batch):
     return default_collate(batch) if len(batch) > 0 else None
 
 # ============================================================
-# TRAIN LOOP
+# METRICS
+# ============================================================
+def compute_eer(scores, labels):
+    idx = np.argsort(scores)[::-1]
+    scores, labels = scores[idx], labels[idx]
+    P = np.sum(labels == 1)
+    N = np.sum(labels == 0)
+    fp, fn = 0, P
+    eer = 1.0
+    for i in range(len(scores)):
+        if labels[i] == 1:
+            fn -= 1
+        else:
+            fp += 1
+        fpr, fnr = fp / N, fn / P
+        eer = min(eer, (fpr + fnr) / 2)
+    return eer
+
+# ============================================================
+# TRAIN / DEV
 # ============================================================
 def train_one_epoch(model, loader, optimizer, criterion, device):
     model.train()
@@ -157,7 +177,7 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
 @torch.no_grad()
 def eval_dev(model, loader, device):
     model.eval()
-    scores, labels = [], []
+    probs, labels = [], []
 
     for batch in loader:
         if batch is None:
@@ -165,25 +185,19 @@ def eval_dev(model, loader, device):
         x, y = batch
         x = x.to(device)
         logits = model(x)
-        prob = torch.sigmoid(logits).squeeze(1).cpu().numpy()
-        scores.append(prob)
+        p = torch.sigmoid(logits).squeeze(1).cpu().numpy()
+        probs.append(p)
         labels.append(np.array(y))
 
-    scores = np.concatenate(scores)
+    probs = np.concatenate(probs)
     labels = np.concatenate(labels)
 
-    # simple EER
-    idx = np.argsort(scores)[::-1]
-    scores, labels = scores[idx], labels[idx]
-    P, N = np.sum(labels == 1), np.sum(labels == 0)
-    fp, fn = 0, P
-    eer = 1.0
-    for i in range(len(scores)):
-        if labels[i] == 1: fn -= 1
-        else: fp += 1
-        fpr, fnr = fp / N, fn / P
-        eer = min(eer, (fpr + fnr) / 2)
-    return eer
+    preds = (probs > 0.5).astype(int)
+    acc = accuracy_score(labels, preds)
+    f1 = f1_score(labels, preds)
+    eer = compute_eer(probs, labels)
+
+    return acc, f1, eer
 
 # ============================================================
 # MAIN
@@ -209,9 +223,15 @@ def main():
 
     for epoch in range(1, EPOCHS + 1):
         loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
-        eer = eval_dev(model, dev_loader, device)
+        acc, f1, eer = eval_dev(model, dev_loader, device)
 
-        print(f"Epoch {epoch:02d} | train_loss={loss:.4f} | dev_EER={eer:.4f}")
+        print(
+            f"Epoch {epoch:02d} | "
+            f"loss={loss:.4f} | "
+            f"acc={acc:.4f} | "
+            f"f1={f1:.4f} | "
+            f"dev_EER={eer:.4f}"
+        )
 
         if eer < best_eer:
             best_eer = eer
@@ -219,8 +239,8 @@ def main():
             torch.save(model.state_dict(), BACKUP_PATH)
             print("✅ BEST MODEL SAVED")
 
-    print("\n🎉 TRAINING DONE")
-    print("Model saved at:")
+    print("\n🎉 TRAINING FINISHED")
+    print("Saved model:")
     print(SAVE_PATH)
     print(BACKUP_PATH)
 
