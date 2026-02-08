@@ -20,15 +20,19 @@ ASV19_CM_PROTO_DIR = os.path.join(ASV19_LA_ROOT, "ASVspoof2019_LA_cm_protocols")
 ASV19_TRAIN_AUDIO_DIR = os.path.join(ASV19_LA_ROOT, "ASVspoof2019_LA_train", "flac")
 ASV19_DEV_AUDIO_DIR   = os.path.join(ASV19_LA_ROOT, "ASVspoof2019_LA_dev", "flac")
 
-ASV19_TRAIN_PROTO = os.path.join(ASV19_CM_PROTO_DIR, "ASVspoof2019.LA.cm.train.trn.txt")
-ASV19_DEV_PROTO   = os.path.join(ASV19_CM_PROTO_DIR, "ASVspoof2019.LA.cm.dev.trl.txt")
+ASV19_TRAIN_PROTO = os.path.join(
+    ASV19_CM_PROTO_DIR, "ASVspoof2019.LA.cm.train.trn.txt"
+)
+ASV19_DEV_PROTO = os.path.join(
+    ASV19_CM_PROTO_DIR, "ASVspoof2019.LA.cm.dev.trl.txt"
+)
 
 # ============================================================
 # TRAINING CONFIG
 # ============================================================
 SEED = 42
 BATCH_SIZE = 16
-EPOCHS = 20          # ✅ FIXED AS REQUESTED
+EPOCHS = 20
 LR = 1e-4
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 2
@@ -44,7 +48,7 @@ BACKUP_DIR = "/kaggle/working/backup_models"
 os.makedirs(MODEL_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
-MODEL_NAME = "RawNetLite_ASV19LA_ULTRASAFE_E20.pt"
+MODEL_NAME = "RawNetLite_A3_PreEmp_Attn_ASV19_E20.pt"
 SAVE_PATH = os.path.join(MODEL_DIR, MODEL_NAME)
 BACKUP_PATH = os.path.join(BACKUP_DIR, MODEL_NAME)
 
@@ -68,7 +72,7 @@ def load_audio_safe(path):
         if sr != SR:
             return None
         return wav.astype(np.float32)
-    except:
+    except Exception:
         return None
 
 def normalize(wav):
@@ -151,15 +155,16 @@ def compute_eer(scores, labels):
 # ============================================================
 def train_one_epoch(model, loader, optimizer, criterion, device):
     model.train()
-    total_loss = 0
+    total_loss = 0.0
     steps = 0
 
     for batch in tqdm(loader, desc="train"):
         if batch is None:
             continue
+
         x, y = batch
         x = x.to(device)
-        y = y.float().to(device).unsqueeze(1)
+        y = y.float().unsqueeze(1).to(device)
 
         logits = model(x)
         loss = criterion(logits, y)
@@ -182,10 +187,13 @@ def eval_dev(model, loader, device):
     for batch in loader:
         if batch is None:
             continue
+
         x, y = batch
         x = x.to(device)
+
         logits = model(x)
         p = torch.sigmoid(logits).squeeze(1).cpu().numpy()
+
         probs.append(p)
         labels.append(np.array(y))
 
@@ -208,21 +216,42 @@ def main():
 
     model = RawNetLite().to(device)
 
-    train_ds = ASVspoof2019CMDataset(ASV19_TRAIN_AUDIO_DIR, ASV19_TRAIN_PROTO)
-    dev_ds   = ASVspoof2019CMDataset(ASV19_DEV_AUDIO_DIR, ASV19_DEV_PROTO)
+    train_ds = ASVspoof2019CMDataset(
+        ASV19_TRAIN_AUDIO_DIR, ASV19_TRAIN_PROTO
+    )
+    dev_ds = ASVspoof2019CMDataset(
+        ASV19_DEV_AUDIO_DIR, ASV19_DEV_PROTO
+    )
 
-    train_loader = DataLoader(train_ds, BATCH_SIZE, shuffle=True,
-                              num_workers=NUM_WORKERS, collate_fn=safe_collate)
-    dev_loader   = DataLoader(dev_ds, BATCH_SIZE, shuffle=False,
-                              num_workers=NUM_WORKERS, collate_fn=safe_collate)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=NUM_WORKERS,
+        collate_fn=safe_collate,
+        pin_memory=True
+    )
+
+    dev_loader = DataLoader(
+        dev_ds,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        collate_fn=safe_collate,
+        pin_memory=True
+    )
 
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY
+    )
 
     best_eer = 1.0
 
     for epoch in range(1, EPOCHS + 1):
-        loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
+        loss = train_one_epoch(
+            model, train_loader, optimizer, criterion, device
+        )
         acc, f1, eer = eval_dev(model, dev_loader, device)
 
         print(
