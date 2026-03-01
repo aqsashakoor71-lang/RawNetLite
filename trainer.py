@@ -12,7 +12,7 @@ from sklearn.metrics import accuracy_score, f1_score
 from RawNetLite import RawNetLite
 
 # ------------------------
-# CONFIG
+
 # ------------------------
 ASV19_ROOT = "/kaggle/input/asvpoof-2019-dataset/LA/LA"
 TRAIN_AUDIO = os.path.join(ASV19_ROOT, "ASVspoof2019_LA_train", "flac")
